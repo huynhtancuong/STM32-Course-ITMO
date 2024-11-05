@@ -18,14 +18,18 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "adc.h"
 #include "dac.h"
 #include "dma.h"
 #include "tim.h"
+#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "math.h"
+#include "string.h"
+#include "stdio.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -76,23 +80,6 @@ void init_y_sine_digital(double V_max) {
     }
 }
 
-//void init_y_sine_digital(double V_max)
-//{
-//  if (V_max > 3.3) V_max = 3.3;
-//
-//  if (V_max < 0) V_max = 0.0;
-//
-//  uint16_t V_max_digital = (V_max/3.3)*0xFFF;
-//
-//  double resolution = 2*M_PI/SINE_N_SAMPLE;
-//
-//  for (size_t i = 0; i < SINE_N_SAMPLE; i++)
-//  {
-//      uint32_t tmp_val = ((sin(i * resolution) + 1) * (1 << (FIXED_POINT_FRACTIONAL_BITS-1)));
-//      y_sine_digital[i] = (tmp_val * (V_max_digital)) >> FIXED_POINT_FRACTIONAL_BITS;
-//  }
-//
-//}
 /* USER CODE END 0 */
 
 /**
@@ -102,7 +89,8 @@ void init_y_sine_digital(double V_max) {
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
+  uint16_t raw;
+  char msg[10];
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -126,19 +114,41 @@ int main(void)
   MX_DMA_Init();
   MX_DAC_Init();
   MX_TIM2_Init();
+  MX_ADC1_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+
   init_sine_table();
   init_y_sine_digital(3.3);
+
   HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*)y_sine_digital, SINE_N_SAMPLE, DAC_ALIGN_12B_R);
   HAL_TIM_Base_Start(&htim2);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* USER CODE END WHILE */
+    // Test: Set GPIO pin high
+    HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_SET);
 
+    // Get ADC value
+    HAL_ADC_Start(&hadc1);
+    HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
+    raw = HAL_ADC_GetValue(&hadc1);
+
+    // Test: Set GPIO pin high
+    HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
+
+    // Convert to string and print
+    sprintf(msg, "%hu\r\n", raw);
+    HAL_UART_Transmit(&huart2, (uint8_t*) msg, strlen(msg), HAL_MAX_DELAY);
+
+    // Pretend we have something else to do for a while
+    HAL_Delay(100);
+
+    /* USER CODE END WHILE */
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
