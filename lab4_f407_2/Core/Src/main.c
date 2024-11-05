@@ -24,6 +24,7 @@
 #include "math.h"
 #include "string.h"
 #include "stdio.h"
+#include "protocol.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,6 +37,7 @@
 #define SINE_N_SAMPLE 100
 #define FIXED_POINT_FRACTIONAL_BITS 8
 #define ADC_BUF_LEN 100
+#define TIMER_TRIG_FREQ  1000000
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -53,13 +55,14 @@ DMA_HandleTypeDef hdma_dac1;
 TIM_HandleTypeDef htim2;
 
 UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart3;
 DMA_HandleTypeDef hdma_usart2_tx;
 
 /* USER CODE BEGIN PV */
 uint32_t y_sine_digital[SINE_N_SAMPLE];
 uint16_t sine_table[SINE_N_SAMPLE];
 char* msg = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Pellentesque dictum tempor ex ut luctus. Curabitur vel placerat nulla. Phasellus mattis dolor eget semper venenatis. Pellentesque semper porttitor justo, at rhoncus orci sollicitudin vitae. Maecenas porttitor ante sed turpis lacinia eleifend. Nulla molestie mauris id urna aliquam fringilla. Sed scelerisque dignissim finibus. In hac habitasse platea dictumst. Donec ac quam at velit luctus malesuada eget vel nisi. Sed eget ante eleifend, scelerisque leo id, tincidunt leo. Mauris blandit interdum pretium. Aliquam egestas risus id nisl finibus malesuada. Praesent sed pellentesque ipsum.\r\n";
-uint8_t adc_buf[ADC_BUF_LEN];
+uint16_t adc_buf[ADC_BUF_LEN];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -70,6 +73,7 @@ static void MX_DAC_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
 void DMA_TransferComplete(DMA_HandleTypeDef *hdma);
 /* USER CODE END PFP */
@@ -93,6 +97,21 @@ void init_y_sine_digital(double V_max) {
     }
 }
 
+void change_freq(float freq) {
+  uint16_t reload_value = TIMER_TRIG_FREQ/(freq*SINE_N_SAMPLE);
+  __HAL_TIM_SET_AUTORELOAD(&htim2, reload_value - 1);
+  __HAL_TIM_SET_COUNTER(&htim2, 0);
+}
+
+// Callback: UART Read 1 byte new
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == huart3.Instance)
+  {
+      UART_RX_Callback(huart);
+  }
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -102,7 +121,8 @@ void init_y_sine_digital(double V_max) {
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
+  change_freq_ptr = &change_freq;
+  change_A_ptr = &init_y_sine_digital;
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -128,10 +148,12 @@ int main(void)
   MX_TIM2_Init();
   MX_ADC1_Init();
   MX_USART2_UART_Init();
+  MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
 
   init_sine_table();
   init_y_sine_digital(3.3);
+  change_freq(100);
 
   HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*)y_sine_digital, SINE_N_SAMPLE, DAC_ALIGN_12B_R);
   HAL_TIM_Base_Start(&htim2);
@@ -140,9 +162,9 @@ int main(void)
 //			   &DMA_TransferComplete);
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buf, ADC_BUF_LEN);
 
-  HAL_UART_Transmit_DMA(&huart2, adc_buf, ADC_BUF_LEN);
+  HAL_UART_Transmit_DMA(&huart2, adc_buf, ADC_BUF_LEN*sizeof(uint16_t));
 
-//  HAL_UART_Transmit_DMA(&huart2, msg, strlen(msg));
+  HAL_UART_Receive_IT(&huart3, &tmp_rx_data, 1);
 
   /* USER CODE END 2 */
 
@@ -154,10 +176,10 @@ int main(void)
 //    huart2.Instance->CR3 |= USART_CR3_DMAT;
 //    HAL_DMA_Start_IT(&hdma_usart2_tx, (uint32_t)msg, (uint32_t)&huart2.Instance->DR, strlen(msg));
 
-    HAL_UART_Transmit_DMA(&huart2, adc_buf, ADC_BUF_LEN);
-    HAL_Delay(1000);
-    HAL_UART_DMAStop(&huart2);
-    HAL_Delay(1000);
+//    HAL_UART_Transmit_DMA(&huart2, adc_buf, ADC_BUF_LEN);
+//    HAL_Delay(1000);
+//    HAL_UART_DMAStop(&huart2);
+//    HAL_Delay(1000);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -232,7 +254,7 @@ static void MX_ADC1_Init(void)
   */
   hadc1.Instance = ADC1;
   hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
-  hadc1.Init.Resolution = ADC_RESOLUTION_8B;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
   hadc1.Init.ScanConvMode = DISABLE;
   hadc1.Init.ContinuousConvMode = ENABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
@@ -321,7 +343,7 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 80-1;
+  htim2.Init.Prescaler = 84-1;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim2.Init.Period = 100-1;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -377,6 +399,39 @@ static void MX_USART2_UART_Init(void)
   /* USER CODE BEGIN USART2_Init 2 */
 
   /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART3_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
 
 }
 
