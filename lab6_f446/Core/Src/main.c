@@ -22,6 +22,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "string.h"
+#include "inttypes.h"
+#include "stdio.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -62,15 +64,16 @@ static void MX_TIM3_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-uint32_t rotary_encoder = 0;
+uint32_t rotary_encoder = 0, setpoint;
 uint32_t motor_encoder, last_motor_encoder = 0;
 uint32_t current_tick = 0, last_tick = 0;
-uint32_t delay_step = 50;
-uint32_t motor_vel;
-uint32_t CCR_Value;
-uint32_t vel_error;
-
-uint8_t msg[50];
+uint32_t delay_step = 5;
+int32_t motor_vel;
+int32_t duty_cycle;
+int32_t error, prev_error = 0;
+int32_t integral = 0, derivative = 0;
+double Kp = 2.0, Ki = 0.1, Kd = 0.0;
+uint8_t msg[100];
 /* USER CODE END 0 */
 
 /**
@@ -118,32 +121,37 @@ int main(void)
       rotary_encoder = __HAL_TIM_GET_COUNTER(&htim4);
       motor_encoder = __HAL_TIM_GET_COUNTER(&htim2);
 
-//      HAL_Delay(50);
+      setpoint = rotary_encoder*10;
+
       current_tick = HAL_GetTick();
 
-      // Calculate velocity
       if (current_tick - last_tick > delay_step) {
 	  last_tick = current_tick;
 
-	  uint32_t d_motor_encoder = motor_encoder - last_motor_encoder;
+	  int32_t d_motor_encoder = motor_encoder - last_motor_encoder;
 	  last_motor_encoder = motor_encoder;
 	  motor_vel = d_motor_encoder*1000/(delay_step); // (tick/s)
 
-	  // Calculate velocity error
-	  uint32_t vel_setpoint = rotary_encoder*10;
-	  vel_error = abs(vel_setpoint - motor_vel);
-
 	  // Calculate control value
-	  CCR_Value = vel_error/2;
+	  error = setpoint - motor_vel;
 
-	  if (CCR_Value > 1000) CCR_Value = 1000;
+	  integral += error*delay_step;
+	  if (abs(error) < 10) integral = 0;
+	  derivative = (error - prev_error)/delay_step;
+	  prev_error = error;
 
-	  // Output to motor
-	  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, CCR_Value);
+	  duty_cycle = (Kp*error) + (Ki*integral) + (Kd*derivative);
+
+	  // ---Output to motor---
+	  if (duty_cycle < 0) duty_cycle = 0;
+	  if (duty_cycle > 1000) duty_cycle = 1000;
+
+	  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, duty_cycle);
 
 	  // UART
-	  sprintf(msg, "%d, %d, %d, %d\r\n", motor_vel, vel_setpoint, vel_error, CCR_Value); // motor_vel, setpoint, error, CCR
-	  HAL_UART_Transmit(&huart2, msg, strlen(msg), 100);
+	  sprintf(msg, "%"PRIu32", %"PRIu32", %"PRIi32", %"PRIi32"\r\n", setpoint, motor_vel, error, duty_cycle);
+	  HAL_UART_Transmit(&huart2, msg, strlen(msg), HAL_MAX_DELAY);
+
       }
     /* USER CODE END WHILE */
 
@@ -164,22 +172,28 @@ void SystemClock_Config(void)
   /** Configure the main internal regulator output voltage
   */
   __HAL_RCC_PWR_CLK_ENABLE();
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 16;
-  RCC_OscInitStruct.PLL.PLLN = 336;
-  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 4;
+  RCC_OscInitStruct.PLL.PLLN = 180;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = 2;
   RCC_OscInitStruct.PLL.PLLR = 2;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Activate the Over-Drive mode
+  */
+  if (HAL_PWREx_EnableOverDrive() != HAL_OK)
   {
     Error_Handler();
   }
@@ -190,10 +204,10 @@ void SystemClock_Config(void)
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
   {
     Error_Handler();
   }
@@ -268,7 +282,7 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 84 - 1;
+  htim3.Init.Prescaler = 180 - 1;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim3.Init.Period = 1000;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -328,7 +342,7 @@ static void MX_TIM4_Init(void)
   htim4.Instance = TIM4;
   htim4.Init.Prescaler = 0;
   htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim4.Init.Period = 1400-1;
+  htim4.Init.Period = 400-1;
   htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   sConfig.EncoderMode = TIM_ENCODERMODE_TI12;

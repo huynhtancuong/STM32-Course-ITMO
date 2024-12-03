@@ -22,6 +22,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "string.h"
+#include "stdio.h"
+#include "stdlib.h"
+#include "inttypes.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -31,8 +34,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define MOTOR_POT_MAX 4010
-#define MOTOR_POT_MIN 100
+#define MOTOR_POT_MAX 4095
+#define MOTOR_POT_MIN 0
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -42,52 +45,54 @@
 
 /* Private variables ---------------------------------------------------------*/
  ADC_HandleTypeDef hadc1;
-ADC_HandleTypeDef hadc2;
+DMA_HandleTypeDef hdma_adc1;
 
 TIM_HandleTypeDef htim2;
 
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-uint16_t setpoint_pot_val, motor_pot_val, setpoint_angle, motor_angle;
-int8_t duty_cycle, error;
+uint32_t setpoint_pot_val, motor_pot_val;
+uint32_t AD_RES_BUFFER[2];
+int32_t duty_cycle, error, prev_error;
+int32_t integral = 0, derivative;
 char msg[30];
+uint32_t current_tick = 0, last_tick = 0;
+uint32_t delay_step = 5;
+double Kp = 2.0, Ki = 0.1, Kd = 0.0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_ADC1_Init(void);
-static void MX_ADC2_Init(void);
-static void MX_TIM2_Init(void);
+static void MX_DMA_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-uint16_t read_adc(ADC_HandleTypeDef *hadc) {
-  HAL_ADC_Start(hadc);
-  HAL_ADC_PollForConversion(hadc, HAL_MAX_DELAY);
-  uint16_t raw = HAL_ADC_GetValue(hadc);
-  return raw;
-}
-
-long map(long x, long in_min, long in_max, long out_min, long out_max)
-{
-  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
-}
-
-void drive_motor(void) {
+void drive_motor(int32_t duty_cycle) {
   // Saturation
-  if (abs(duty_cycle) > 100) duty_cycle = 100*duty_cycle/abs(duty_cycle);
+  if (abs(duty_cycle) > 1000)
+    duty_cycle = 1000*duty_cycle/abs(duty_cycle);
   uint8_t dir = GPIO_PIN_SET;
   if (duty_cycle < 0) dir = GPIO_PIN_RESET;
 
   // Output to motor
   HAL_GPIO_WritePin(M_DIR_GPIO_Port, M_DIR_Pin, dir);
   __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, abs(duty_cycle));
+}
+
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
+{
+  if (hadc == &hadc1) {
+      setpoint_pot_val = AD_RES_BUFFER[0];
+      motor_pot_val = AD_RES_BUFFER[1];
+  }
 }
 
 /* USER CODE END 0 */
@@ -121,32 +126,40 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_ADC1_Init();
-  MX_ADC2_Init();
-  MX_TIM2_Init();
+  MX_DMA_Init();
   MX_USART2_UART_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
+  HAL_ADC_Start_DMA(&hadc1, AD_RES_BUFFER, 2);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-      setpoint_pot_val = read_adc(&hadc1);
-      motor_pot_val = read_adc(&hadc2);
+      current_tick = HAL_GetTick();
+      if (current_tick - last_tick > delay_step) {
+	  last_tick = current_tick;
 
-      setpoint_angle = map(setpoint_pot_val, 0, 4096, 0, 270);
-      motor_angle = map(motor_pot_val, MOTOR_POT_MIN, MOTOR_POT_MAX, 0, 270);
+	  error = setpoint_pot_val - motor_pot_val;
+	  integral += error*delay_step;
+	  if (abs(error) < 10) integral = 0;
+	  derivative = (error - prev_error)/delay_step;
+	  prev_error = error;
 
-      error = setpoint_angle - motor_angle;
-      duty_cycle = error*2;
+	  duty_cycle = (Kp*error) + (Ki*integral) + (Kd*derivative);
 
-      // To serial
-      sprintf(msg, "%d,%d,%d,%d\r\n", setpoint_angle, motor_angle, error, duty_cycle);
-      HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+	  // Drive motor
+	  drive_motor(duty_cycle);
 
-      // Drive motor
-      drive_motor();
+
+	  // To serial
+	  sprintf(msg, "%"PRIu32", %"PRIu32", %"PRIi32", %"PRIi32"\r\n", setpoint_pot_val, motor_pot_val, error, duty_cycle);
+	  HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+
+      }
+
 
       // Delay
 //      HAL_Delay(5);
@@ -174,12 +187,11 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 8;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 4;
   RCC_OscInitStruct.PLL.PLLN = 180;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = 2;
@@ -234,13 +246,13 @@ static void MX_ADC1_Init(void)
   hadc1.Instance = ADC1;
   hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc1.Init.ScanConvMode = DISABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.ScanConvMode = ENABLE;
+  hadc1.Init.ContinuousConvMode = ENABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 1;
+  hadc1.Init.NbrOfConversion = 2;
   hadc1.Init.DMAContinuousRequests = DISABLE;
   hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
@@ -257,61 +269,18 @@ static void MX_ADC1_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN ADC1_Init 2 */
-
-  /* USER CODE END ADC1_Init 2 */
-
-}
-
-/**
-  * @brief ADC2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_ADC2_Init(void)
-{
-
-  /* USER CODE BEGIN ADC2_Init 0 */
-
-  /* USER CODE END ADC2_Init 0 */
-
-  ADC_ChannelConfTypeDef sConfig = {0};
-
-  /* USER CODE BEGIN ADC2_Init 1 */
-
-  /* USER CODE END ADC2_Init 1 */
-
-  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
-  */
-  hadc2.Instance = ADC2;
-  hadc2.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
-  hadc2.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc2.Init.ScanConvMode = DISABLE;
-  hadc2.Init.ContinuousConvMode = DISABLE;
-  hadc2.Init.DiscontinuousConvMode = DISABLE;
-  hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc2.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc2.Init.NbrOfConversion = 1;
-  hadc2.Init.DMAContinuousRequests = DISABLE;
-  hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  if (HAL_ADC_Init(&hadc2) != HAL_OK)
-  {
-    Error_Handler();
-  }
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
   sConfig.Channel = ADC_CHANNEL_10;
-  sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
-  if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
+  sConfig.Rank = 2;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN ADC2_Init 2 */
+  /* USER CODE BEGIN ADC1_Init 2 */
 
-  /* USER CODE END ADC2_Init 2 */
+  /* USER CODE END ADC1_Init 2 */
 
 }
 
@@ -394,6 +363,22 @@ static void MX_USART2_UART_Init(void)
   /* USER CODE BEGIN USART2_Init 2 */
 
   /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA2_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA2_Stream0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
 
 }
 
