@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MF0 version="1.1" packageUris="http://schema.mathworks.com/mf0/slsa_mm_rtp_registry/R2023a">
+  <slsa.mm.rtpregistry.ModelMetadata type="slsa.mm.rtpregistry.ModelMetadata" uuid="52ec9ea9-c70a-4936-819b-190c4f232e9a">
+    <modelName>lab4</modelName>
+  </slsa.mm.rtpregistry.ModelMetadata>
+</MF0>
